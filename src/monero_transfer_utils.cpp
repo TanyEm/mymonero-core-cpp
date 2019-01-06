@@ -35,6 +35,7 @@
 #include "wallet_errors.h"
 #include "string_tools.h"
 #include "monero_paymentID_utils.hpp"
+#include "monero_key_image_utils.hpp"
 //
 using namespace std;
 using namespace crypto;
@@ -46,6 +47,7 @@ using namespace tools; // for error::
 using namespace monero_transfer_utils;
 using namespace monero_fork_rules;
 using namespace monero_fee_utils;
+using namespace monero_key_image_utils; // for API response parsing
 //
 // Transfer parsing/derived properties
 bool monero_transfer_utils::is_transfer_unlocked(
@@ -92,7 +94,7 @@ bool monero_transfer_utils::is_tx_spendtime_unlocked(
 }
 //
 CreateTransactionErrorCode _add_pid_to_tx_extra(
-	optional<string> payment_id_string,
+	const optional<string>& payment_id_string,
 	vector<uint8_t> &extra
 ) { // Detect hash8 or hash32 char hex string as pid and configure 'extra' accordingly
 	bool r = false;
@@ -175,8 +177,6 @@ bool _verify_sec_key(const crypto::secret_key &secret_key, const crypto::public_
 	return r && public_key == calculated_pub;
 }
 //
-//
-//----------------------------------------------------------------------------------------------------
 namespace
 {
 	template<typename T>
@@ -185,9 +185,9 @@ namespace
 		CHECK_AND_ASSERT_MES(!vec.empty(), T(), "Vector must be non-empty");
 		CHECK_AND_ASSERT_MES(idx < vec.size(), T(), "idx out of bounds");
 
-		T res = vec[idx];
+		T res = std::move(vec[idx]);
 		if (idx + 1 != vec.size()) {
-			vec[idx] = vec.back();
+			vec[idx] = std::move(vec.back());
 		}
 		vec.resize(vec.size() - 1);
 		
@@ -205,11 +205,12 @@ namespace
 }
 //
 //
+//
 // Decomposed Send procedure
 void monero_transfer_utils::send_step1__prepare_params_for_get_decoys(
 	Send_Step1_RetVals &retVals,
 	//
-	optional<string> payment_id_string,
+	const optional<string>& payment_id_string,
 	uint64_t sending_amount,
 	bool is_sweeping,
 	uint32_t simple_priority,
@@ -298,9 +299,9 @@ void monero_transfer_utils::send_step1__prepare_params_for_get_decoys(
 //				cout << "Sweeping and found a dusty but mixable (rct) amount... keeping it!" << endl;
 			}
 		}
-		retVals.using_outs.push_back(out);
 		using_outs_amount += out.amount;
 //		cout << "Using output: " << out.amount << " - " << out.public_key << endl;
+		retVals.using_outs.push_back(std::move(out));
 	}
 	retVals.spendable_balance = using_outs_amount; // must store for needMoreMoneyThanFound return
 	// Note: using_outs and using_outs_amount may still get modified below (so retVals.spendable_balance gets updated)
@@ -335,10 +336,12 @@ void monero_transfer_utils::send_step1__prepare_params_for_get_decoys(
 	} else {
 		total_incl_fees = sending_amount + needed_fee; // because fee changed because using_outs.size() was updated
 		while (using_outs_amount < total_incl_fees && remaining_unusedOuts.size() > 0) { // add outputs 1 at a time till we either have them all or can meet the fee
-			auto out = pop_random_value(remaining_unusedOuts);
-//			cout << "Using output: " << out.amount << " - " << out.public_key << endl;
-			retVals.using_outs.push_back(out);
-			using_outs_amount += out.amount;
+			{
+				auto out = pop_random_value(remaining_unusedOuts);
+//				cout << "Using output: " << out.amount << " - " << out.public_key << endl;
+				using_outs_amount += out.amount;
+				retVals.using_outs.push_back(std::move(out));
+			}
 			retVals.spendable_balance = using_outs_amount; // must store for needMoreMoneyThanFound return
 			//
 			// Recalculate fee, total incl fees
@@ -377,18 +380,18 @@ void monero_transfer_utils::send_step1__prepare_params_for_get_decoys(
 void monero_transfer_utils::send_step2__try_create_transaction(
 	Send_Step2_RetVals &retVals,
 	//
-	string from_address_string,
-	string sec_viewKey_string,
-	string sec_spendKey_string,
-	string to_address_string,
-	optional<string> payment_id_string,
+	const string &from_address_string,
+	const string &sec_viewKey_string,
+	const string &sec_spendKey_string,
+	const string &to_address_string,
+	const optional<string>& payment_id_string,
 	uint64_t final_total_wo_fee,
 	uint64_t change_amount,
 	uint64_t fee_amount,
 	uint32_t simple_priority,
-	vector<SpendableOutput> &using_outs,
+	const vector<SpendableOutput> &using_outs,
 	uint64_t fee_per_b, // per v8
-	vector<RandomAmountOutputs> &mix_outs,
+	vector<RandomAmountOutputs> &mix_outs, // cannot be const due to convenience__create_transaction's mutability requirement
 	use_fork_rules_fn_type use_fork_rules_fn,
 	uint64_t unlock_time, // or 0
 	cryptonote::network_type nettype
@@ -445,9 +448,9 @@ void monero_transfer_utils::create_transaction(
 	uint64_t sending_amount,
 	uint64_t change_amount,
 	uint64_t fee_amount,
-	vector<SpendableOutput> &outputs,
-	vector<RandomAmountOutputs> &mix_outs,
-	std::vector<uint8_t> &extra,
+	const vector<SpendableOutput> &outputs,
+	vector<RandomAmountOutputs> &mix_outs, 
+	const std::vector<uint8_t> &extra,
 	use_fork_rules_fn_type use_fork_rules_fn,
 	uint64_t unlock_time, // or 0
 	bool rct,
@@ -691,11 +694,11 @@ void monero_transfer_utils::convenience__create_transaction(
 	const string &sec_viewKey_string,
 	const string &sec_spendKey_string,
 	const string &to_address_string,
-	optional<string> payment_id_string,
+	const optional<string>& payment_id_string,
 	uint64_t sending_amount,
 	uint64_t change_amount,
 	uint64_t fee_amount,
-	vector<SpendableOutput> &outputs,
+	const vector<SpendableOutput> &outputs,
 	vector<RandomAmountOutputs> &mix_outs,
 	use_fork_rules_fn_type use_fork_rules_fn,
 	uint64_t unlock_time,
